@@ -1173,3 +1173,75 @@ class MultiVehicleCollision(Dynamics):
             'y_axis_idx': 1,
             'z_axis_idx': 6,
         }
+
+class DubinsRel2Car(Dynamics):
+    def __init__(self, collisionR: float, velocity_ego: float, velocity_adv: float, omega_max: float, angle_alpha_factor: float, set_mode: str):
+        self.collisionR = collisionR
+        self.v1 = velocity_ego
+        self.v2 = velocity_adv
+        self.omega_max = omega_max
+        self.angle_alpha_factor = angle_alpha_factor
+
+        super().__init__(
+            loss_type='brt_hjivi',
+            set_mode=set_mode,
+            state_dim=3,
+            input_dim=4,
+            control_dim=1,
+            disturbance_dim=1,
+            state_mean=[0, 0, 0],
+            state_var=[4, 4, self.angle_alpha_factor * math.pi],
+            value_mean=self.collisionR,
+            value_var=4,
+            value_normto=0.02,
+            deepreach_model='exact',
+        )
+
+    def dsdt(self, state, control, disturbance):
+        dsdt = torch.zeros_like(state)
+        theta = state[..., 2]
+        dsdt[..., 0] = self.v1 * torch.cos(theta) - self.v2
+        dsdt[..., 1] = self.v1 * torch.sin(theta)
+        dsdt[..., 2] = control[..., 0] - disturbance[..., 0]
+        return dsdt
+
+    def boundary_fn(self, state):
+        return torch.norm(state[..., :2], dim=-1) - self.collisionR
+
+    def hamiltonian(self, state, dvds):
+        theta = state[..., 2]
+        h_xy = self.v1 * (torch.cos(theta) * dvds[..., 0] + torch.sin(theta) * dvds[..., 1]) - self.v2 * dvds[..., 0]
+        if self.set_mode == 'avoid':
+            return h_xy + self.omega_max * (torch.abs(dvds[..., 2]) + torch.abs(dvds[..., 2]))
+        else:
+            return h_xy - self.omega_max * (torch.abs(dvds[..., 2]) + torch.abs(dvds[..., 2]))
+
+    def optimal_control(self, state, dvds):
+        return (self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+
+    def optimal_disturbance(self, state, dvds):
+        return (-self.omega_max * torch.sign(dvds[..., 2]))[..., None]
+
+    def state_test_range(self):
+        return [[-4, 4], [-4, 4], [-math.pi, math.pi]]
+    
+    def sample_target_state(self, num_samples):
+        raise NotImplementedError("Pretraining not implemented for this system.")
+
+    def cost_fn(self, state_traj):
+        return self.boundary_fn(state_traj).min(dim=-1).values
+
+
+    def equivalent_wrapped_state(self, state):
+        wrapped = torch.clone(state)
+        wrapped[..., 2] = (wrapped[..., 2] + math.pi) % (2 * math.pi) - math.pi
+        return wrapped
+
+    def plot_config(self):
+        return {
+            'state_slices': [0, 0, 0],  # fix theta_r = 0
+            'state_labels': ['x_r', 'y_r', r'$\theta_r$'],
+            'x_axis_idx': 0,
+            'y_axis_idx': 1,
+            'z_axis_idx': 2,
+        }
